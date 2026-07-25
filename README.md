@@ -31,19 +31,19 @@ PILT est une plateforme QA conçue pour les équipes Agile. Elle couvre la gesti
 
 <table>
   <tr>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-11%20172946.png" alt="Capture 1" width="320" /></td>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-11%20173002.png" alt="Capture 2" width="320" /></td>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-11%20182126.png" alt="Capture 3" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-11 172946.png" alt="Capture 1" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-11 173002.png" alt="Capture 2" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-11 182126.png" alt="Capture 3" width="320" /></td>
   </tr>
   <tr>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-11%20182417.png" alt="Capture 4" width="320" /></td>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-11%20182851.png" alt="Capture 5" width="320" /></td>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-13%20015621.png" alt="Capture 6" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-11 182417.png" alt="Capture 4" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-11 182851.png" alt="Capture 5" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-13 015621.png" alt="Capture 6" width="320" /></td>
   </tr>
   <tr>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-13%20124036.png" alt="Capture 7" width="320" /></td>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-13%20131453.png" alt="Capture 8" width="320" /></td>
-    <td><img src="file:///C:/Users/kheli/OneDrive/Bureau/New%20folder/Screenshot%202026-05-13%20131543.png" alt="Capture 9" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-13 124036.png" alt="Capture 7" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-13 131453.png" alt="Capture 8" width="320" /></td>
+    <td><img src="docs/screenshots/Screenshot 2026-05-13 131543.png" alt="Capture 9" width="320" /></td>
   </tr>
 </table>
 
