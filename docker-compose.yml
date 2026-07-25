@@ -1,0 +1,49 @@
+services:
+
+  backend:
+    build: ./plateforme-back
+    container_name: backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./plateforme-back/.env
+    depends_on:
+      - db
+
+  frontend:
+    build:
+      context: ./plateforme-tests
+      args:
+        NEXT_PUBLIC_API_URL: /api
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:15
+    container_name: postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: mohamedtaha
+      POSTGRES_PASSWORD: mou7@peha
+      POSTGRES_DB: plateforme
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - /etc/letsencrypt:/etc/letsencrypt
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  postgres_data:

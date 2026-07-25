@@ -1,0 +1,641 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { Sprint, Project } from "@/types";
+import { getMyProjects } from "@/features/projects/api";
+import { getSprints } from "@/features/sprints/api";
+import { Sidebar } from "@/components/dashboard/Sidebar";
+import { DashboardHeader } from "@/components/dashboard/DashboardHeader";
+import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
+import { ProjectSelectorCard } from "@/components/dashboard/ProjectSelectorCard";
+import { ROUTES } from "@/lib/constants";
+
+export default function SprintsPage() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProject, setSelectedProject] = useState<number | null>(null);
+  const [sprints, setSprints] = useState<Sprint[]>([]);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+  const [isLoadingSprints, setIsLoadingSprints] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const sidebarLinks = [
+    { href: ROUTES.PRODUCT_OWNER, icon: "dashboard", label: "Dashboard" },
+    { href: `${ROUTES.PRODUCT_OWNER}/projects`, icon: "folder", label: "Projets" },
+    { href: `${ROUTES.PRODUCT_OWNER}/backlog`, icon: "list", label: "Backlog" },
+    { href: `${ROUTES.PRODUCT_OWNER}/epics`, icon: "content_cut", label: "Epics" },
+    { href: `${ROUTES.PRODUCT_OWNER}/sprints`, icon: "event", label: "Sprints" },
+    { href: `${ROUTES.PRODUCT_OWNER}/cahier-tests`, icon: "menu_book", label: "Cahier de Tests" },
+    { href: `${ROUTES.PRODUCT_OWNER}/rapports-qa`, icon: "assessment", label: "Rapports QA" },
+    { href: `${ROUTES.PRODUCT_OWNER}/profile`, icon: "account_circle", label: "Mon Profil" },
+  ];
+
+  useEffect(() => {
+    loadProjects();
+  }, []);
+
+  useEffect(() => {
+    if (selectedProject) {
+      loadSprints(selectedProject);
+    }
+    if (!selectedProject) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      loadSprints(selectedProject);
+    }, 15000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [selectedProject]);
+
+  const loadProjects = async () => {
+    setIsLoadingProjects(true);
+    try {
+      const projectsData = await getMyProjects();
+      setProjects(projectsData);
+      if (projectsData.length > 0) {
+        setSelectedProject(projectsData[0].id);
+      }
+    } catch (error) {
+      console.error("Failed to load projects:", error);
+    } finally {
+      setIsLoadingProjects(false);
+    }
+  };
+
+  const loadSprints = async (projectId: number) => {
+    setIsLoadingSprints(true);
+    setError(null);
+    try {
+      const data = await getSprints(projectId);
+      setSprints(data);
+    } catch (error: any) {
+      console.error("Failed to load sprints:", error);
+      setError("Impossible de charger les sprints");
+      setSprints([]);
+    } finally {
+      setIsLoadingSprints(false);
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "termine":
+        return "bg-green-500/20 text-green-400 border-green-500/30";
+      case "en_cours":
+        return "bg-blue-500/20 text-blue-400 border-blue-500/30";
+      case "planifie":
+        return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
+      default:
+        return "bg-gray-500/20 text-gray-400 border-gray-500/30";
+    }
+  };
+
+  const getStatusLabel = (status: string) => {
+    switch (status) {
+      case "termine":
+        return "Terminé";
+      case "en_cours":
+        return "En Cours";
+      case "planifie":
+        return "Planifié";
+      default:
+        return status;
+    }
+  };
+
+  const formatDate = (dateString?: string) => {
+    if (!dateString) return "-";
+    return new Date(dateString).toLocaleDateString("fr-FR", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+  };
+
+  const calculateProgress = (sprint: Sprint) => {
+    if (!sprint.userstories || sprint.userstories.length === 0) return 0;
+    const completed = sprint.userstories.filter((us) => us.statut === "done").length;
+    return Math.round((completed / sprint.userstories.length) * 100);
+  };
+
+  const isSprintCompletedByProgress = (sprint: Sprint) => {
+    if (!sprint.userstories || sprint.userstories.length === 0) {
+      return false;
+    }
+
+    return sprint.userstories.every((us) => us.statut === "done");
+  };
+
+  const getComputedStatus = (sprint: Sprint) =>
+    isSprintCompletedByProgress(sprint) ? "termine" : sprint.statut;
+
+  const isSprintExpired = (sprint: Sprint) => {
+    if (!sprint.dateFin) {
+      return false;
+    }
+
+    if (getComputedStatus(sprint) === "termine") {
+      return false;
+    }
+
+    return new Date(sprint.dateFin) < new Date();
+  };
+
+  const getProgressColor = (progress: number) => {
+    if (progress >= 80) return "bg-green-500";
+    if (progress >= 50) return "bg-blue-500";
+    if (progress >= 25) return "bg-yellow-500";
+    return "bg-red-500";
+  };
+  const getOrderedSprints = (items: Sprint[]) =>
+    [...items].sort((a, b) => {
+      if (a.dateDebut && b.dateDebut) {
+        return new Date(a.dateDebut).getTime() - new Date(b.dateDebut).getTime();
+      }
+      if (a.dateDebut && !b.dateDebut) {
+        return -1;
+      }
+      if (!a.dateDebut && b.dateDebut) {
+        return 1;
+      }
+      return a.id - b.id;
+    });
+
+  const getSprintDisplayName = (sprint: Sprint, index: number) => {
+    return `Sprint ${index + 1}`;
+  };
+  // Calculate sprint statistics
+  const sprintStats = {
+    total: sprints.length,
+    active: sprints.filter((s) => getComputedStatus(s) === "en_cours").length,
+    completed: sprints.filter((s) => getComputedStatus(s) === "termine").length,
+    planned: sprints.filter((s) => getComputedStatus(s) === "planifie").length,
+    avgVelocity: sprints.length > 0
+      ? Math.round(sprints.reduce((sum, s) => sum + (s.velocite || 0), 0) / sprints.length)
+      : 0,
+  };
+
+  return (
+    <DashboardLayout
+      sidebarContent={
+        <Sidebar
+          title="Product Owner"
+          subtitle="FlowPilot Platform"
+          icon="account_tree"
+          links={sidebarLinks}
+        />
+      }
+      headerContent={
+        <DashboardHeader
+          title="Sprints"
+          subtitle="Consultation de l'avancement des sprints et validation des livrables"
+        />
+      }
+    >
+      <div className="max-w-7xl mx-auto flex flex-col gap-6">
+        <ProjectSelectorCard
+          projects={projects}
+          selectedProjectId={selectedProject}
+          selectedProjectName={projects.find((p) => p.id === selectedProject)?.nom || null}
+          onSelectProject={setSelectedProject}
+          badgeText="Suivi des sprints"
+          description="Selectionnez un projet pour piloter l'avancement des sprints et valider les livrables." 
+          disabled={isLoadingProjects}
+        />
+
+        {/* Sprint Statistics Cards */}
+        {!isLoadingSprints && sprints.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+            {/* Total Sprints */}
+            <div className="bg-blue-50/70 dark:bg-surface-dark border border-blue-200 dark:border-[#3b4754] rounded-xl p-5 hover:border-blue-500/40 transition-all">
+              <div className="flex items-center justify-between mb-3">
+                <span className="material-symbols-outlined text-blue-400 text-3xl">
+                  event_note
+                </span>
+                <div className="text-3xl font-bold text-blue-400">{sprintStats.total}</div>
+              </div>
+              <p className="text-sm text-slate-500 dark:text-[#9dabb9] font-medium">Total Sprints</p>
+            </div>
+
+            {/* Active Sprints */}
+            <div className="bg-green-50/70 dark:bg-surface-dark border border-green-200 dark:border-[#3b4754] rounded-xl p-5 hover:border-green-500/40 transition-all">
+              <div className="flex items-center justify-between mb-3">
+                <span className="material-symbols-outlined text-green-400 text-3xl">
+                  play_circle
+                </span>
+                <div className="text-3xl font-bold text-green-400">{sprintStats.active}</div>
+              </div>
+              <p className="text-sm text-slate-500 dark:text-[#9dabb9] font-medium">En Cours</p>
+            </div>
+
+            {/* Completed Sprints */}
+            <div className="bg-violet-50/70 dark:bg-surface-dark border border-violet-200 dark:border-[#3b4754] rounded-xl p-5 hover:border-purple-500/40 transition-all">
+              <div className="flex items-center justify-between mb-3">
+                <span className="material-symbols-outlined text-purple-400 text-3xl">
+                  check_circle
+                </span>
+                <div className="text-3xl font-bold text-purple-400">{sprintStats.completed}</div>
+              </div>
+              <p className="text-sm text-slate-500 dark:text-[#9dabb9] font-medium">Terminés</p>
+            </div>
+
+            {/* Planned Sprints */}
+            <div className="bg-amber-50/70 dark:bg-surface-dark border border-amber-200 dark:border-[#3b4754] rounded-xl p-5 hover:border-yellow-500/40 transition-all">
+              <div className="flex items-center justify-between mb-3">
+                <span className="material-symbols-outlined text-yellow-400 text-3xl">
+                  schedule
+                </span>
+                <div className="text-3xl font-bold text-yellow-400">{sprintStats.planned}</div>
+              </div>
+              <p className="text-sm text-slate-500 dark:text-[#9dabb9] font-medium">Planifiés</p>
+            </div>
+
+            {/* Average Velocity */}
+            <div className="bg-primary/5 dark:bg-surface-dark border border-primary/20 dark:border-[#3b4754] rounded-xl p-5 hover:border-primary/40 transition-all">
+              <div className="flex items-center justify-between mb-3">
+                <span className="material-symbols-outlined text-primary text-3xl">
+                  speed
+                </span>
+                <div className="text-3xl font-bold text-primary">{sprintStats.avgVelocity}</div>
+              </div>
+              <p className="text-sm text-slate-500 dark:text-[#9dabb9] font-medium">Vélocité Moy.</p>
+            </div>
+          </div>
+        )}
+
+      {/* Sprints List */}
+      {isLoadingSprints ? (
+        <div className="bg-primary/5 dark:bg-surface-dark border border-primary/30 dark:border-[#3b4754] rounded-xl p-12 flex flex-col items-center justify-center gap-4">
+          <div className="relative">
+            <div className="w-16 h-16 border-4 border-primary-500/20 rounded-full"></div>
+            <div className="absolute top-0 left-0 w-16 h-16 border-4 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
+          </div>
+          <div className="text-center">
+            <p className="text-slate-900 dark:text-white font-semibold text-lg mb-1">Chargement des sprints</p>
+            <p className="text-slate-500 dark:text-[#9dabb9] text-sm">Veuillez patienter...</p>
+          </div>
+        </div>
+      ) : sprints.length === 0 ? (
+        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-[#3b4754] rounded-xl p-16 text-center">
+          <div className="flex justify-center mb-6">
+            <div className="w-24 h-24 bg-gray-500/10 rounded-full flex items-center justify-center">
+              <span className="material-symbols-outlined text-gray-400 text-6xl">
+                event_busy
+              </span>
+            </div>
+          </div>
+          <h3 className="text-slate-900 dark:text-white font-bold text-xl mb-2">Aucun sprint trouvé</h3>
+          <p className="text-slate-500 dark:text-[#9dabb9] text-sm leading-relaxed max-w-md mx-auto">
+            Aucun sprint n'est disponible pour ce projet. Les sprints seront créés par le Scrum Master.
+          </p>
+        </div>
+      ) : (
+        <div className="grid gap-6">
+          {getOrderedSprints(sprints).map((sprint, index) => {
+            const progress = calculateProgress(sprint);
+            const computedStatus = getComputedStatus(sprint);
+            const isExpired = isSprintExpired(sprint);
+            const daysLeft = sprint.dateFin && computedStatus === "en_cours" && !isExpired
+              ? Math.ceil(
+                  (new Date(sprint.dateFin).getTime() - new Date().getTime()) /
+                    (1000 * 60 * 60 * 24)
+                )
+              : null;
+            
+            const totalPoints = sprint.userstories?.reduce((sum, us) => sum + (us.points || 0), 0) || 0;
+            const completedPoints = sprint.userstories?.filter(us => us.statut === "done").reduce((sum, us) => sum + (us.points || 0), 0) || 0;
+            const pointsProgress = totalPoints > 0 ? Math.round((completedPoints / totalPoints) * 100) : 0;
+
+            return (
+              <div
+                key={sprint.id}
+                className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-[#3b4754] rounded-2xl p-6 hover:border-primary/50 transition-all duration-300"
+              >
+                {/* Sprint Header */}
+                <div className="flex items-start justify-between mb-6">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-3 mb-3">
+                      <span className="material-symbols-outlined text-primary text-3xl">
+                        sprint
+                      </span>
+                      <h3 className="text-2xl font-bold text-slate-900 dark:text-white">{getSprintDisplayName(sprint, index)}</h3>
+                      <span
+                        className={`px-4 py-1.5 text-xs font-bold rounded-full border-2 ${getStatusColor(
+                          computedStatus
+                        )}`}
+                      >
+                        {getStatusLabel(computedStatus)}
+                      </span>
+                      {isExpired && (
+                        <span className="px-3 py-1.5 text-xs font-bold rounded-full border-2 bg-red-500/20 text-red-400 border-red-500/30">
+                          Expiré
+                        </span>
+                      )}
+                    </div>
+                    {sprint.objectifSprint && (
+                      <div className="flex items-start gap-2 bg-slate-50 dark:bg-[#1e293b] rounded-lg p-3 border border-slate-200 dark:border-[#3b4754]">
+                        <span className="material-symbols-outlined text-primary text-lg mt-0.5">
+                          flag
+                        </span>
+                        <p className="text-slate-600 dark:text-[#9dabb9] text-sm leading-relaxed">{sprint.objectifSprint}</p>
+                      </div>
+                    )}
+                  </div>
+                  {computedStatus === "en_cours" && daysLeft !== null && (
+                    <div className="bg-blue-500/10 dark:bg-[#1e293b] border-2 border-blue-500/40 rounded-xl px-6 py-4 text-center ml-4">
+                      <div className="text-4xl font-black text-blue-400">{daysLeft}</div>
+                      <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase tracking-wide mt-1">jours restants</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Sprint Dates & Metrics - Enhanced */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                  <div className="bg-slate-50 dark:bg-[#1e293b] border border-slate-200 dark:border-[#3b4754] rounded-lg p-4 hover:border-primary/50 transition-all">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="material-symbols-outlined text-green-400 text-lg">
+                        event
+                      </span>
+                      <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase">Date Début</div>
+                    </div>
+                    <div className="text-base font-bold text-slate-900 dark:text-white">
+                      {formatDate(sprint.dateDebut)}
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 dark:bg-[#1e293b] border border-slate-200 dark:border-[#3b4754] rounded-lg p-4 hover:border-primary/50 transition-all">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="material-symbols-outlined text-red-400 text-lg">
+                        event
+                      </span>
+                      <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase">Date Fin</div>
+                    </div>
+                    <div className={`text-base font-bold ${isExpired ? "text-red-400" : "text-slate-900 dark:text-white"}`}>
+                      {formatDate(sprint.dateFin)}
+                    </div>
+                    {isExpired && sprint.dateFin && (
+                      <div className="text-xs text-red-400 font-semibold mt-1">
+                        Date expirée le {formatDate(sprint.dateFin)}
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-slate-50 dark:bg-[#1e293b] border border-slate-200 dark:border-[#3b4754] rounded-lg p-4 hover:border-primary/50 transition-all">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="material-symbols-outlined text-yellow-400 text-lg">
+                        inventory
+                      </span>
+                      <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase">Capacité</div>
+                    </div>
+                    <div className="text-base font-bold text-slate-900 dark:text-white">
+                      {sprint.capaciteEquipe} <span className="text-sm text-slate-500 dark:text-[#9dabb9]">pts</span>
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 dark:bg-[#1e293b] border border-slate-200 dark:border-[#3b4754] rounded-lg p-4 hover:border-primary/50 transition-all">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="material-symbols-outlined text-primary text-lg">
+                        speed
+                      </span>
+                      <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase">Vélocité</div>
+                    </div>
+                    <div className="text-base font-bold text-primary">
+                      {sprint.velocite || 0} <span className="text-sm text-slate-500 dark:text-[#9dabb9]">pts</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Progress Section - Enhanced with dual progress bars */}
+                <div className="bg-slate-50 dark:bg-[#1e293b] border border-slate-200 dark:border-[#3b4754] rounded-xl p-5 mb-6">
+                  <div className="grid md:grid-cols-2 gap-6">
+                    {/* Stories Progress */}
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <span className="material-symbols-outlined text-blue-400 text-lg">
+                            checklist
+                          </span>
+                          <span className="text-sm text-slate-700 dark:text-[#9dabb9] font-semibold">Progression Stories</span>
+                        </div>
+                        <span className="text-lg font-black text-slate-900 dark:text-white">{progress}%</span>
+                      </div>
+                        <div className="w-full bg-slate-200 dark:bg-[#0f172a] rounded-full h-3 overflow-hidden shadow-inner">
+                        <div
+                          className={`h-3 rounded-full ${getProgressColor(progress)} transition-all duration-500 shadow-lg`}
+                          style={{ width: `${progress}%` }}
+                        ></div>
+                      </div>
+                      <div className="flex justify-between mt-2 text-xs text-slate-500 dark:text-[#9dabb9]">
+                        <span>{sprint.userstories?.filter(us => us.statut === "done").length || 0} terminées</span>
+                        <span>{sprint.userstories?.length || 0} total</span>
+                      </div>
+                    </div>
+
+                    {/* Points Progress */}
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <span className="material-symbols-outlined text-primary text-lg">
+                            analytics
+                          </span>
+                          <span className="text-sm text-slate-700 dark:text-[#9dabb9] font-semibold">Progression Points</span>
+                        </div>
+                        <span className="text-lg font-black text-slate-900 dark:text-white">{pointsProgress}%</span>
+                      </div>
+                        <div className="w-full bg-slate-200 dark:bg-[#0f172a] rounded-full h-3 overflow-hidden shadow-inner">
+                        <div
+                          className={`h-3 rounded-full ${getProgressColor(pointsProgress)} transition-all duration-500 shadow-lg`}
+                          style={{ width: `${pointsProgress}%` }}
+                        ></div>
+                      </div>
+                      <div className="flex justify-between mt-2 text-xs text-slate-500 dark:text-[#9dabb9]">
+                        <span>{completedPoints} pts complétés</span>
+                        <span>{totalPoints} pts total</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* User Stories */}
+                {sprint.userstories && sprint.userstories.length > 0 && (
+                  <div className="mb-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h4 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary">
+                          description
+                        </span>
+                        User Stories
+                        <span className="px-2 py-1 bg-primary/20 text-primary rounded-full text-xs font-bold">
+                          {sprint.userstories.length}
+                        </span>
+                      </h4>
+                    </div>
+                    <div className="grid gap-3">
+                      {sprint.userstories.map((us) => (
+                        <div
+                          key={us.id}
+                          className="flex items-center justify-between bg-slate-50 dark:bg-[#1e293b] border border-slate-200 dark:border-[#3b4754] rounded-lg p-4 hover:border-primary/30 transition-all group"
+                        >
+                          <div className="flex items-center gap-4 flex-1">
+                            {/* Status Icon */}
+                            <div className={`flex items-center justify-center w-10 h-10 rounded-full ${
+                              us.statut === "done"
+                                ? "bg-green-500/20 border-2 border-green-500/50"
+                                : us.statut === "in_progress"
+                                ? "bg-blue-500/20 border-2 border-blue-500/50"
+                                : us.statut === "ready_for_test"
+                                ? "bg-amber-500/20 border-2 border-amber-500/50"
+                                : "bg-gray-500/20 border-2 border-gray-500/50"
+                            }`}>
+                              <span
+                                className={`material-symbols-outlined text-lg ${
+                                  us.statut === "done"
+                                    ? "text-green-400"
+                                    : us.statut === "in_progress"
+                                    ? "text-blue-400"
+                                    : us.statut === "ready_for_test"
+                                    ? "text-amber-400"
+                                    : "text-gray-400"
+                                }`}
+                              >
+                                {us.statut === "done"
+                                  ? "check_circle"
+                                  : us.statut === "in_progress"
+                                  ? "pending"
+                                  : us.statut === "ready_for_test"
+                                  ? "fact_check"
+                                  : "radio_button_unchecked"}
+                              </span>
+                            </div>
+                            
+                            {/* Story Title */}
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2">
+                                {us.reference && (
+                                  <span className="text-slate-500 dark:text-[#9dabb9] text-xs font-mono bg-white dark:bg-[#0f172a] px-1.5 py-0.5 rounded border border-slate-200 dark:border-[#3b4754]">
+                                    {us.reference}
+                                  </span>
+                                )}
+                                <span className="text-sm text-slate-900 dark:text-white font-medium group-hover:text-primary transition-colors">
+                                  {us.titre}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
+                                  us.statut === "done"
+                                    ? "bg-green-500/20 text-green-400"
+                                    : us.statut === "in_progress"
+                                    ? "bg-blue-500/20 text-blue-400"
+                                    : us.statut === "ready_for_test"
+                                    ? "bg-amber-500/20 text-amber-400"
+                                    : "bg-gray-500/20 text-gray-400"
+                                }`}>
+                                  {us.statut === "done"
+                                    ? "Terminée"
+                                    : us.statut === "in_progress"
+                                    ? "En cours"
+                                    : us.statut === "ready_for_test"
+                                    ? "Pret pour test"
+                                    : "À faire"}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          
+                          {/* Points Badge */}
+                          {us.points && (
+                            <div className="bg-primary/20 border border-primary/40 px-4 py-2 rounded-lg">
+                              <span className="text-primary font-black text-sm">{us.points}</span>
+                              <span className="text-primary/70 text-xs ml-1">pts</span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* QA Report - Enhanced Design */}
+                {sprint.rapport_qa && (
+                  <div className="bg-green-50/60 dark:bg-surface-dark border border-green-200 dark:border-[#3b4754] rounded-xl p-6">
+                    <div className="flex items-center gap-3 mb-5">
+                      <div className="flex items-center justify-center w-12 h-12 bg-green-500/20 rounded-full border border-green-500/30">
+                        <span className="material-symbols-outlined text-green-400 text-2xl">
+                          verified
+                        </span>
+                      </div>
+                      <div>
+                        <h4 className="text-lg font-bold text-green-400">
+                          Rapport QA Disponible
+                        </h4>
+                        <p className="text-xs text-slate-500 dark:text-[#9dabb9]">
+                          Tests validés et rapport généré
+                        </p>
+                      </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      {/* Success Rate */}
+                      <div className="bg-white/80 dark:bg-[#1e293b] border border-green-200 dark:border-[#3b4754] rounded-lg p-4 text-center">
+                        <div className="text-3xl font-black text-green-400 mb-1">
+                          {sprint.rapport_qa.tauxReussite}%
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase tracking-wide">
+                          Taux de Réussite
+                        </div>
+                      </div>
+                      
+                      {/* Tests Executed */}
+                      <div className="bg-white/80 dark:bg-[#1e293b] border border-blue-200 dark:border-[#3b4754] rounded-lg p-4 text-center">
+                        <div className="text-3xl font-black text-blue-400 mb-1">
+                          {sprint.rapport_qa.nombreTestsExecutes}
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase tracking-wide">
+                          Tests Exécutés
+                        </div>
+                      </div>
+                      
+                      {/* Tests Passed */}
+                      <div className="bg-white/80 dark:bg-[#1e293b] border border-green-200 dark:border-[#3b4754] rounded-lg p-4 text-center">
+                        <div className="text-3xl font-black text-green-400 mb-1">
+                          {sprint.rapport_qa.nombreTestsReussis}
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase tracking-wide">
+                          Réussis
+                        </div>
+                      </div>
+                      
+                      {/* Tests Failed */}
+                      <div className="bg-white/80 dark:bg-[#1e293b] border border-red-200 dark:border-[#3b4754] rounded-lg p-4 text-center">
+                        <div className="text-3xl font-black text-red-400 mb-1">
+                          {sprint.rapport_qa.nombreTestsEchoues}
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-[#9dabb9] font-semibold uppercase tracking-wide">
+                          Échoués
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-50/70 dark:bg-surface-dark border border-red-300 dark:border-red-500/40 rounded-xl p-6 flex items-start gap-4">
+          <div className="flex items-center justify-center w-12 h-12 bg-red-500/20 rounded-full shrink-0">
+            <span className="material-symbols-outlined text-red-400 text-2xl">error</span>
+          </div>
+          <div className="flex-1">
+            <h3 className="text-red-400 font-bold text-lg mb-1">Erreur de chargement</h3>
+            <p className="text-red-300 text-sm leading-relaxed">{error}</p>
+          </div>
+        </div>
+      )}
+      </div>
+    </DashboardLayout>
+  );
+}

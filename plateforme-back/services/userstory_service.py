@@ -1,0 +1,660 @@
+"""
+Service métier pour la gestion des User Stories
+"""
+from typing import List, Optional
+from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
+
+from repositories.scrum_repository import UserStoryRepository
+from repositories.epic_repository import EpicRepository
+from repositories.projet_repository import ProjetRepository
+from models.scrum import UserStory, Epic, Module
+from models.cahier_test_global import CasTest, CahierTestGlobal
+from models.user import Utilisateur
+from core.rbac.constants import ROLE_DEVELOPPEUR, ROLE_SCRUM_MASTER, ROLE_TESTEUR_QA
+from models.notification import TypeNotification
+from services.notification_service import NotificationService
+from schemas.userstory import (
+    CreateUserStoryRequest,
+    UpdateUserStoryRequest,
+    ChangerStatutUSRequest,
+    AssignerDeveloppeurRequest,
+    AssignerTesteurRequest,
+    AssignerAssigneeRequest,
+    AssignerScrumMasterRequest,
+    STORY_POINTS_VALIDES,
+)
+
+
+def _assembler_description(role: str, action: str, benefice: Optional[str]) -> str:
+    """Construit la phrase 'En tant que / je veux / afin de'."""
+    base = f"En tant que {role}, je veux {action}"
+    if benefice:
+        base += f", afin de {benefice}"
+    return base + "."
+
+
+class UserStoryService:
+    def __init__(self, db: Session):
+        self.db = db
+        self.repo = UserStoryRepository(db)
+        self.epic_repo = EpicRepository(db)
+        self.projet_repo = ProjetRepository(db)
+        self.notification_service = NotificationService(db)
+
+    def _related_user_ids(self, us) -> set[int]:
+        ids: set[int] = set()
+        for field in ("developerId", "testerId", "assigneeId", "scrumMasterId"):
+            value = getattr(us, field, None)
+            if value:
+                ids.add(value)
+        return ids
+
+    def _verifier_membre_avec_role(self, projet_id: int, user_id: int, role_code: str):
+        user = self._verifier_membre_projet(projet_id, user_id)
+        user_role_code = user.role.code if user.role else None
+        if user_role_code != role_code:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"L'utilisateur {user_id} doit avoir le rôle {role_code} pour cette affectation.",
+            )
+        return user
+
+    def _build_project_us_number_map(self, projet_id: int) -> dict[int, int]:
+        rows = (
+            self.db.query(UserStory.id)
+            .join(Epic, UserStory.epic_id == Epic.id)
+            .join(Module, Epic.module_id == Module.id)
+            .filter(Module.projet_id == projet_id)
+            .order_by(UserStory.id.asc())
+            .all()
+        )
+        return {us_id: idx + 1 for idx, (us_id,) in enumerate(rows)}
+
+    def _project_reference_prefix(self, projet_id: int) -> str:
+        projet = self.projet_repo.get_by_id(projet_id)
+        return (projet.key if projet and projet.key else "US").upper()
+
+    def _apply_project_reference(self, projet_id: int, stories: List) -> List:
+        mapping = self._build_project_us_number_map(projet_id)
+        prefix = self._project_reference_prefix(projet_id)
+        for us in stories:
+            numero = mapping.get(us.id)
+            if numero is not None:
+                us.reference = f"{prefix}-{numero}"
+            self._attach_bug_context(us, projet_id)
+        return stories
+
+    def _attach_bug_context(self, us, projet_id: int):
+        cas = (
+            self.db.query(CasTest)
+            .join(CahierTestGlobal, CasTest.cahier_id == CahierTestGlobal.id)
+            .filter(
+                CasTest.user_story_id == us.id,
+                CahierTestGlobal.projet_id == projet_id,
+                CasTest.statut_test.in_(["Échoué", "Bloqué"]),
+            )
+            .order_by(CasTest.date_creation.desc(), CasTest.id.desc())
+            .first()
+        )
+        bug_titre = cas.bug_titre_correction if cas else None
+        bug_tache = cas.bug_nom_tache if cas else None
+        setattr(us, "bug_titre_correction", bug_titre)
+        setattr(us, "bug_nom_tache", bug_tache)
+        setattr(us, "bug_ticket", bug_tache or bug_titre)
+        return us
+
+    def _get_projet_id_from_us(self, us) -> Optional[int]:
+        if us and getattr(us, "epic", None):
+            return us.epic.projet_id
+        if not us:
+            return None
+        row = (
+            self.db.query(Module.projet_id)
+            .select_from(UserStory)
+            .join(Epic, UserStory.epic_id == Epic.id)
+            .join(Module, Epic.module_id == Module.id)
+            .filter(UserStory.id == us.id)
+            .first()
+        )
+        return row[0] if row else None
+
+    def _us_ref(self, us) -> str:
+        projet_id = self._get_projet_id_from_us(us)
+        if projet_id:
+            mapping = self._build_project_us_number_map(projet_id)
+            prefix = self._project_reference_prefix(projet_id)
+            numero = mapping.get(us.id)
+            if numero:
+                return f"{prefix}-{numero}"
+        return us.reference or str(us.id)
+
+    def _notify_assignment(self, us, user_id: int, role_label: str):
+        self.notification_service.notify_user(
+            user_id=user_id,
+            titre=f"Affectation {role_label}",
+            message=(
+                f"La user story {self._us_ref(us)} ({us.titre}) vous a ete affectee "
+                f"en tant que {role_label}."
+            ),
+            notification_type=TypeNotification.USER_STORY_ASSIGNED_TO_ME,
+            priorite="moyenne",
+        )
+        self.notification_service.notify_user(
+            user_id=user_id,
+            titre="Nouvelle affectation",
+            message=(
+                f"Vous avez recu une nouvelle affectation sur {self._us_ref(us)} "
+                f"({us.titre}) en tant que {role_label}."
+            ),
+            notification_type=TypeNotification.NEW_ASSIGNMENT,
+            priorite="moyenne",
+        )
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _verifier_projet(self, projet_id: int):
+        projet = self.projet_repo.get_by_id(projet_id)
+        if not projet:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"Projet {projet_id} introuvable.")
+        return projet
+
+    def _verifier_epic(self, epic_id: int, projet_id: int):
+        epic = self.epic_repo.get_by_id_in_projet(epic_id, projet_id)
+        if not epic:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"Epic {epic_id} introuvable dans le projet {projet_id}.")
+        return epic
+
+    def _verifier_membre_projet(self, projet_id: int, user_id: int):
+        """Vérifier que l'utilisateur est membre (ou Product Owner) du projet."""
+        from models.user import Utilisateur
+        projet = self._verifier_projet(projet_id)
+        est_po = projet.productOwnerId == user_id
+        est_membre = any(m.id == user_id for m in projet.membres)
+        if not est_po and not est_membre:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"L'utilisateur {user_id} n'est pas membre du projet {projet_id}.",
+            )
+        user = self.db.query(Utilisateur).filter(Utilisateur.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"Utilisateur {user_id} introuvable.")
+        return user
+
+    def _verifier_po(self, projet_id: int, current_user_id: int):
+        projet = self._verifier_projet(projet_id)
+        if projet.productOwnerId != current_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Seul le Product Owner peut effectuer cette action.")
+        return projet
+
+    def _get_us_ou_404(self, us_id: int, epic_id: int):
+        us = self.repo.get_by_id(us_id)
+        if not us or us.epic_id != epic_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"User story {us_id} introuvable dans l'epic {epic_id}.")
+        return us
+
+    def _valider_points(self, points: Optional[int]):
+        if points is not None and points not in STORY_POINTS_VALIDES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Story points invalides. Valeurs Fibonacci acceptées : {sorted(STORY_POINTS_VALIDES)}",
+            )
+
+    def _get_current_user(self, user_id: int):
+        user = self.db.query(Utilisateur).filter(Utilisateur.id == user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Utilisateur {user_id} introuvable.",
+            )
+        return user
+
+    # ── Création ────────────────────────────────────────────────────────────
+
+    def creer_user_story(
+        self,
+        projet_id: int,
+        epic_id: int,
+        data: CreateUserStoryRequest,
+        current_user_id: int,
+    ):
+        """Décomposer un epic en user story — Scrum Master ou Product Owner."""
+        projet = self._verifier_projet(projet_id)
+        self._verifier_epic(epic_id, projet_id)
+        self._valider_points(data.points)
+
+        description = _assembler_description(data.role, data.action, data.benefice)
+
+        # Incrémenter le compteur global du projet pour obtenir la référence
+        numero = self.projet_repo.next_issue_number(projet_id)
+        reference = f"{projet.key}-{numero}"
+
+        created = self.repo.create({
+            "reference": reference,
+            "titre": data.titre,
+            "description": description,
+            "criteresAcceptation": data.criteresAcceptation,
+            "points": data.points,
+            "duree_estimee": data.duree_estimee,
+            "start_date": data.start_date,
+            "due_date": data.due_date,
+            "priorite": data.priorite,
+            "statut": "to_do",
+            "epic_id": epic_id,
+            "developerId": None,
+            "testerId": None,
+            "assigneeId": self._valider_assignee_optionnel(projet_id, data.assignee_id),
+            "scrumMasterId": None,
+        })
+
+        self.notification_service.notify_project_users(
+            project_id=projet_id,
+            titre="Nouvelle user story creee",
+            message=f"La user story {self._us_ref(created)} ({created.titre}) a ete creee.",
+            notification_type=TypeNotification.USER_STORY_CREATED,
+            priorite="moyenne",
+            exclude_user_id=current_user_id,
+        )
+        self._apply_project_reference(projet_id, [created])
+        return created
+
+    # ── Lecture ─────────────────────────────────────────────────────────────
+
+    def get_user_stories(
+        self,
+        projet_id: int,
+        epic_id: int,
+        statut: Optional[str] = None,
+    ) -> List:
+        epic = self.epic_repo.get_by_id_in_projet(epic_id, projet_id)
+        if not epic:
+            return []
+        stories = self.repo.get_by_epic(epic_id)
+        if statut:
+            stories = [us for us in stories if us.statut == statut]
+        self._apply_project_reference(projet_id, stories)
+        ordre = {"must_have": 0, "should_have": 1, "could_have": 2, "wont_have": 3}
+        stories.sort(key=lambda us: ordre.get(us.priorite, 99))
+        return stories
+
+    def get_user_story(self, projet_id: int, epic_id: int, us_id: int):
+        self._verifier_epic(epic_id, projet_id)
+        story = self._get_us_ou_404(us_id, epic_id)
+        self._apply_project_reference(projet_id, [story])
+        return story
+
+    def get_backlog(self, projet_id: int, epic_id: int):
+        """User stories non encore affectées à un sprint."""
+        epic = self.epic_repo.get_by_id_in_projet(epic_id, projet_id)
+        if not epic:
+            return []
+        stories = self.repo.get_backlog(epic_id)
+        self._apply_project_reference(projet_id, stories)
+        return stories
+
+    # ── Modification ─────────────────────────────────────────────────────────
+
+    def modifier_user_story(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        data: UpdateUserStoryRequest,
+        current_user_id: int,
+    ):
+        self._verifier_epic(epic_id, projet_id)
+        us = self._get_us_ou_404(us_id, epic_id)
+        self._valider_points(data.points)
+
+        fields = data.model_dump(exclude_none=True)
+
+        # Traiter assignee_id séparément (peut être explicitement None pour retirer l'assignee)
+        if "assignee_id" in data.model_fields_set:
+            fields["assigneeId"] = self._valider_assignee_optionnel(projet_id, data.assignee_id)
+            fields.pop("assignee_id", None)
+        else:
+            fields.pop("assignee_id", None)
+
+        # Reassembler la description si au moins un des champs narratifs est fourni
+        role = fields.pop("role", None)
+        action = fields.pop("action", None)
+        benefice = fields.pop("benefice", None)
+        if role or action or benefice:
+            # Partir de la description existante si champ manquant
+            import re
+            current = us.description or ""
+            def extract(pattern, text):
+                m = re.search(pattern, text)
+                return m.group(1).strip() if m else ""
+
+            effective_role = role or extract(r"En tant que (.+?),", current)
+            effective_action = action or extract(r"je veux (.+?)(?:, afin|\.)", current)
+            effective_benefice = benefice or extract(r"afin de (.+?)\.", current) or None
+            fields["description"] = _assembler_description(
+                effective_role, effective_action, effective_benefice
+            )
+
+        updated = self.repo.update(us_id, fields)
+        if updated and fields:
+            self.notification_service.notify_project_users(
+                project_id=projet_id,
+                titre="User story mise a jour",
+                message=f"La user story {self._us_ref(updated)} ({updated.titre}) a ete modifiee.",
+                notification_type=TypeNotification.USER_STORY_UPDATED,
+                priorite="basse",
+                exclude_user_id=current_user_id,
+            )
+        if updated:
+            self._apply_project_reference(projet_id, [updated])
+        return updated
+
+    # ── Assigner assignee ─────────────────────────────────────────────────────
+
+    def assigner_assignee(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        data: AssignerAssigneeRequest,
+        current_user_id: int,
+    ):
+        """Désigner le responsable (assignee) d'une user story — doit être membre du projet."""
+        self._verifier_epic(epic_id, projet_id)
+        us = self._get_us_ou_404(us_id, epic_id)
+        previous_assignee_id = us.assigneeId
+        self._verifier_membre_projet(projet_id, data.assignee_id)
+        updated = self.repo.update(us_id, {"assigneeId": data.assignee_id})
+        if updated and data.assignee_id != previous_assignee_id:
+            self._notify_assignment(updated, data.assignee_id, "responsable")
+            self.notification_service.notify_project_users(
+                project_id=projet_id,
+                titre="Nouvelle affectation",
+                message=(
+                    f"{self._us_ref(updated)} ({updated.titre}) a un nouveau responsable assigne."
+                ),
+                notification_type=TypeNotification.NEW_ASSIGNMENT,
+                priorite="moyenne",
+                exclude_user_id=current_user_id,
+            )
+        if updated:
+            self._apply_project_reference(projet_id, [updated])
+        return updated
+
+    def retirer_assignee(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        current_user_id: int,
+    ):
+        """Retirer l'assignee d'une user story."""
+        self._verifier_epic(epic_id, projet_id)
+        us = self._get_us_ou_404(us_id, epic_id)
+        previous_assignee_id = us.assigneeId
+        updated = self.repo.update(us_id, {"assigneeId": None})
+        if previous_assignee_id:
+            self.notification_service.notify_user(
+                user_id=previous_assignee_id,
+                titre="Retrait d'affectation",
+                message=(
+                    f"Vous n'etes plus responsable de la user story {self._us_ref(us)} "
+                    f"({us.titre})."
+                ),
+                notification_type=TypeNotification.USER_STORY_UPDATED,
+                priorite="basse",
+            )
+            self.notification_service.notify_project_users(
+                project_id=projet_id,
+                titre="Affectation retiree",
+                message=f"Le responsable de {self._us_ref(us)} ({us.titre}) a ete retire.",
+                notification_type=TypeNotification.USER_STORY_UPDATED,
+                priorite="basse",
+                exclude_user_id=current_user_id,
+            )
+        if updated:
+            self._apply_project_reference(projet_id, [updated])
+        return updated
+
+    # ── Statut ───────────────────────────────────────────────────────────────
+
+    def changer_statut(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        data: ChangerStatutUSRequest,
+        current_user_id: int,
+    ):
+        self._verifier_epic(epic_id, projet_id)
+        us = self._get_us_ou_404(us_id, epic_id)
+        current_user = self._get_current_user(current_user_id)
+        if current_user.role and current_user.role.code == ROLE_DEVELOPPEUR and us.developerId != current_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vous ne pouvez modifier que les user stories qui vous sont assignées.",
+            )
+        old_status = us.statut
+        updated = self.repo.update(us_id, {"statut": data.statut})
+        if updated and old_status != data.statut:
+            self.notification_service.notify_project_users(
+                project_id=projet_id,
+                titre="Mise a jour de statut",
+                message=(
+                    f"La user story {self._us_ref(updated)} ({updated.titre}) est passee de "
+                    f"{old_status} a {data.statut}."
+                ),
+                notification_type=TypeNotification.USER_STORY_UPDATED,
+                priorite="moyenne",
+                exclude_user_id=current_user_id,
+            )
+            if data.statut == "ready_for_test":
+                if updated.testerId:
+                    self.notification_service.notify_user(
+                        user_id=updated.testerId,
+                        titre="User story prete pour test",
+                        message=(
+                            f"La user story {self._us_ref(updated)} ({updated.titre}) "
+                            "est prete pour test. Veuillez proceder aux tests."
+                        ),
+                        notification_type=TypeNotification.USER_STORY_READY_FOR_TEST,
+                        priorite="haute",
+                    )
+                if updated.scrumMasterId:
+                    self.notification_service.notify_user(
+                        user_id=updated.scrumMasterId,
+                        titre="User story prete pour test",
+                        message=(
+                            f"La user story {self._us_ref(updated)} ({updated.titre}) "
+                            "a ete marquee prete pour test par le developpeur."
+                        ),
+                        notification_type=TypeNotification.USER_STORY_READY_FOR_TEST,
+                        priorite="moyenne",
+                    )
+            if data.statut == "a_corriger":
+                if updated.developerId:
+                    self.notification_service.notify_user(
+                        user_id=updated.developerId,
+                        titre="User story a corriger",
+                        message=(
+                            f"La user story {self._us_ref(updated)} ({updated.titre}) "
+                            "doit etre corrigee suite a des tests."
+                        ),
+                        notification_type=TypeNotification.USER_STORY_NEEDS_FIX,
+                        priorite="haute",
+                    )
+                if updated.scrumMasterId:
+                    self.notification_service.notify_user(
+                        user_id=updated.scrumMasterId,
+                        titre="Correction requise",
+                        message=(
+                            f"La user story {self._us_ref(updated)} ({updated.titre}) "
+                            "a ete retournee en correction par le testeur."
+                        ),
+                        notification_type=TypeNotification.USER_STORY_NEEDS_FIX,
+                        priorite="haute",
+                    )
+            if data.statut == "done":
+                self.notification_service.notify_project_users(
+                    project_id=projet_id,
+                    titre="User story terminee",
+                    message=(
+                        f"La user story {self._us_ref(updated)} ({updated.titre}) a ete "
+                        "terminee."
+                    ),
+                    notification_type=TypeNotification.USER_STORY_VALIDATED,
+                    priorite="moyenne",
+                    exclude_user_id=current_user_id,
+                )
+        if updated:
+            self._apply_project_reference(projet_id, [updated])
+        return updated
+
+    # ── Assigner développeur ─────────────────────────────────────────────────
+
+    def assigner_developpeur(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        data: AssignerDeveloppeurRequest,
+        current_user_id: int,
+    ):
+        """Assigner un développeur à une user story — Scrum Master uniquement."""
+        self._verifier_epic(epic_id, projet_id)
+        us = self._get_us_ou_404(us_id, epic_id)
+        previous_developer_id = us.developerId
+        self._verifier_membre_avec_role(projet_id, data.developeur_id, ROLE_DEVELOPPEUR)
+        updated = self.repo.update(us_id, {"developerId": data.developeur_id})
+        if updated and data.developeur_id != previous_developer_id:
+            self._notify_assignment(updated, data.developeur_id, "developpeur")
+            self.notification_service.notify_project_users(
+                project_id=projet_id,
+                titre="Nouvelle affectation",
+                message=(
+                    f"{self._us_ref(updated)} ({updated.titre}) a ete affectee a un "
+                    "developpeur."
+                ),
+                notification_type=TypeNotification.NEW_ASSIGNMENT,
+                priorite="moyenne",
+                exclude_user_id=current_user_id,
+            )
+        if updated:
+            self._apply_project_reference(projet_id, [updated])
+        return updated
+
+    def assigner_testeur(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        data: AssignerTesteurRequest,
+        current_user_id: int,
+    ):
+        """Assigner un testeur QA à une user story — Scrum Master uniquement."""
+        self._verifier_epic(epic_id, projet_id)
+        us = self._get_us_ou_404(us_id, epic_id)
+        previous_tester_id = us.testerId
+        self._verifier_membre_avec_role(projet_id, data.testeur_id, ROLE_TESTEUR_QA)
+        updated = self.repo.update(us_id, {"testerId": data.testeur_id})
+        if updated and data.testeur_id != previous_tester_id:
+            self._notify_assignment(updated, data.testeur_id, "testeur")
+            self.notification_service.notify_project_users(
+                project_id=projet_id,
+                titre="Nouvelle affectation",
+                message=(
+                    f"{self._us_ref(updated)} ({updated.titre}) a ete affectee a un "
+                    "testeur."
+                ),
+                notification_type=TypeNotification.NEW_ASSIGNMENT,
+                priorite="moyenne",
+                exclude_user_id=current_user_id,
+            )
+        if updated:
+            self._apply_project_reference(projet_id, [updated])
+        return updated
+
+    def assigner_scrum_master(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        data: AssignerScrumMasterRequest,
+        current_user_id: int,
+    ):
+        """Assigner un scrum master à une user story."""
+        self._verifier_epic(epic_id, projet_id)
+        us = self._get_us_ou_404(us_id, epic_id)
+        previous_scrum_master_id = getattr(us, "scrumMasterId", None)
+        self._verifier_membre_avec_role(projet_id, data.scrum_master_id, ROLE_SCRUM_MASTER)
+        updated = self.repo.update(us_id, {"scrumMasterId": data.scrum_master_id})
+        if updated and data.scrum_master_id != previous_scrum_master_id:
+            self._notify_assignment(updated, data.scrum_master_id, "scrum master")
+            self.notification_service.notify_project_users(
+                project_id=projet_id,
+                titre="Nouvelle affectation",
+                message=(
+                    f"{self._us_ref(updated)} ({updated.titre}) a un scrum master assigne."
+                ),
+                notification_type=TypeNotification.NEW_ASSIGNMENT,
+                priorite="moyenne",
+                exclude_user_id=current_user_id,
+            )
+        if updated:
+            self._apply_project_reference(projet_id, [updated])
+        return updated
+
+    # ── Valider ──────────────────────────────────────────────────────────────
+
+    def valider_user_story(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        current_user_id: int,
+    ):
+        """Marquer la user story comme 'done' — Product Owner uniquement."""
+        self._verifier_po(projet_id, current_user_id)
+        self._verifier_epic(epic_id, projet_id)
+        self._get_us_ou_404(us_id, epic_id)
+        updated = self.repo.update(us_id, {"statut": "done"})
+        if updated:
+            self.notification_service.notify_project_users(
+                project_id=projet_id,
+                titre="User story validee",
+                message=(
+                    f"La user story {self._us_ref(updated)} ({updated.titre}) a ete validee "
+                    "et marquee done."
+                ),
+                notification_type=TypeNotification.USER_STORY_VALIDATED,
+                priorite="moyenne",
+                exclude_user_id=current_user_id,
+            )
+        if updated:
+            self._apply_project_reference(projet_id, [updated])
+        return updated
+
+    # ── Suppression ──────────────────────────────────────────────────────────
+
+    def supprimer_user_story(
+        self,
+        projet_id: int,
+        epic_id: int,
+        us_id: int,
+        current_user_id: int,
+    ):
+        self._verifier_epic(epic_id, projet_id)
+        us = self._get_us_ou_404(us_id, epic_id)
+        self.repo.delete(us_id)
+        self.notification_service.notify_project_users(
+            project_id=projet_id,
+            titre="User story supprimee",
+            message=f"La user story {self._us_ref(us)} ({us.titre}) a ete supprimee.",
+            notification_type=TypeNotification.USER_STORY_DELETED,
+            priorite="moyenne",
+            exclude_user_id=current_user_id,
+        )

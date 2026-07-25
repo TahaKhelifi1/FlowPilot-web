@@ -1,0 +1,149 @@
+import axiosInstance from "@/lib/axios";
+import {
+  Project,
+  CreateProjectPayload,
+  UpdateProjectPayload,
+} from "@/types";
+
+const BASE_URL = "/projets";
+
+/**
+ * Fetch all projects owned by the current user (Product Owner)
+ */
+export const getMyProjects = async (): Promise<Project[]> => {
+  const response = await axiosInstance.get<Project[]>(`${BASE_URL}/mes-projets`);
+  return response.data;
+};
+
+/**
+ * Fetch all projects where the current user is a member (for Scrum Master, Developers, etc.)
+ */
+export const getMyProjectsAsMember = async (): Promise<Project[]> => {
+  const response = await axiosInstance.get<Project[]>(`${BASE_URL}/mes-projets-membre`);
+  return response.data;
+};
+
+/**
+ * Fetch all projects (Super Admin only)
+ */
+export const getAllProjects = async (): Promise<Project[]> => {
+  const response = await axiosInstance.get<Project[]>(BASE_URL);
+  return response.data;
+};
+
+/**
+ * Fetch projects assigned to a specific user (Super Admin only)
+ */
+export const getUserProjects = async (userId: number): Promise<Project[]> => {
+  const response = await axiosInstance.get<Project[]>(`${BASE_URL}/utilisateurs/${userId}`);
+  return response.data;
+};
+
+/**
+ * Get a single project by ID
+ */
+export const getProjectById = async (
+  projectId: number,
+  suppressErrorLog?: boolean
+): Promise<Project> => {
+  const response = await axiosInstance.get<Project>(`${BASE_URL}/${projectId}`, {
+    suppressErrorLog,
+  });
+  return response.data;
+};
+
+/**
+ * Create a new project
+ */
+export const createProject = async (
+  payload: CreateProjectPayload
+): Promise<Project> => {
+  const response = await axiosInstance.post<Project>(BASE_URL, payload);
+  return response.data;
+};
+
+/**
+ * Update an existing project
+ */
+export const updateProject = async (
+  projectId: number,
+  payload: UpdateProjectPayload
+): Promise<Project> => {
+  const response = await axiosInstance.put<Project>(
+    `${BASE_URL}/${projectId}`,
+    payload
+  );
+  return response.data;
+};
+
+/**
+ * Archive a project
+ */
+export const archiveProject = async (projectId: number): Promise<Project> => {
+  const response = await axiosInstance.patch<Project>(
+    `${BASE_URL}/${projectId}/archiver`
+  );
+  return response.data;
+};
+
+/**
+ * Unarchive a project
+ */
+export const unarchiveProject = async (projectId: number): Promise<Project> => {
+  const response = await axiosInstance.patch<Project>(
+    `${BASE_URL}/${projectId}/desarchiver`
+  );
+  return response.data;
+};
+
+/**
+ * Assign members to a project
+ */
+export const assignMembers = async (
+  projectId: number,
+  memberIds: number[]
+): Promise<Project> => {
+  const response = await axiosInstance.post<Project>(
+    `${BASE_URL}/${projectId}/membres`,
+    { membre_ids: memberIds }
+  );
+  return response.data;
+};
+
+/**
+ * Get available members for project assignment (Product Owner accessible)
+ */
+export const getAvailableMembers = async (): Promise<any[]> => {
+  const response = await axiosInstance.get<any[]>(
+    `${BASE_URL}/membres-disponibles`
+  );
+  return response.data;
+};
+
+/**
+ * Delete a project
+ */
+export const deleteProject = async (projectId: number): Promise<void> => {
+  await axiosInstance.delete(`${BASE_URL}/${projectId}`);
+};
+
+export interface ProjectAISuggestionResponse {
+  nom?: string | null;
+  description?: string | null;
+  objectif?: string | null;
+  dateDebut?: string | null;
+  dateFin?: string | null;
+}
+
+/**
+ * Suggest project form fields from a natural language prompt
+ */
+export const suggestProjectFields = async (
+  prompt: string
+): Promise<ProjectAISuggestionResponse> => {
+  const response = await axiosInstance.post<ProjectAISuggestionResponse>(
+    `${BASE_URL}/ai-suggestion`,
+    { prompt }
+  );
+  return response.data;
+};
